@@ -1,0 +1,13 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * A PAM module should export its service functions and nothing else.
+ * Everything internal stays local so that two modules in the same stack
+ * cannot collide on a helper name — pam_elogind.sym does the same.
+ */
+{
+global:
+        pam_sm_open_session;
+        pam_sm_close_session;
+local: *;
+};
