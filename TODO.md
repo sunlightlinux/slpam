@@ -4,68 +4,17 @@ The build, the exported symbol set and the design decisions in
 `README.md` are settled. The session logic is not written. This is the
 order to write it in, and why.
 
-## 1. `pam_sm_open_session` → `CreateSession`
+## 1–4. Done
 
-Gather what the call needs from the PAM handle — `PAM_USER` (then
-`getpwnam` for the uid), `PAM_SERVICE`, `PAM_TTY`, `PAM_XDISPLAY`,
-`PAM_RUSER`, `PAM_RHOST` — derive type, class, seat and vtnr, and call
-`CreateSession` on `org.freedesktop.login1.Manager`.
+`pam_sm_open_session` calls `CreateSessionWithPIDFD` (falling back to
+`CreateSession`), exports the `XDG_*` variables and remembers the session
+it created; `pam_sm_close_session` releases it. The FIFO question is
+closed: since systemd v258 a session ends with its leader's pidfd, and
+slinit-logind 3.16 does the same and returns a placeholder fd, which the
+module closes. README.md records the contract.
 
-The signature is `uusssssussbss` followed by an `a(sv)` of properties,
-in that order: uid, pid, service, type, class, desktop, seat, vtnr, tty,
-display, remote, remote_user, remote_host. Send an empty property array
-to begin with; the `MemoryMax` handling elogind does is step 5.
-
-Returns, in order: session id, object path, runtime path, FIFO fd, uid,
-seat, vtnr, and an `existing` flag. **Honour `existing`** — a second
-`CreateSession` for a session that already exists is not an error, and
-treating it as one is how a display manager ends up unable to reuse a
-seat.
-
-## 2. Export the session to the environment
-
-`pam_putenv` for `XDG_SESSION_ID`, `XDG_RUNTIME_DIR`, `XDG_SESSION_TYPE`,
-`XDG_SESSION_CLASS`, `XDG_SEAT` and `XDG_VTNR`. Without these a desktop
-session comes up unable to find its own runtime directory, which looks
-like a dozen unrelated failures.
-
-Only set `XDG_RUNTIME_DIR` when the session is not `existing`, matching
-elogind: a second session for the same user must not re-point it.
-
-## 3. `pam_sm_close_session` → `ReleaseSession`
-
-Not optional, and the reason is specific to slinit-logind: it ships the
-session FIFO fd but **does not watch it yet** (its own comment calls
-that Phase C). So cleanup rests on this call, with a watch on the
-session leader's death as the only safety net. A session that is never
-released leaves a record that blocks a replacement greeter.
-
-## 4. Decide what to do with the FIFO fd — OPEN
-
-In systemd and elogind the fd *is* the session lifetime: logind watches
-the read end and the session ends when the last write end closes. The
-module deliberately leaks it into the session leader for exactly that
-reason.
-
-slinit-logind does not watch it yet, so today holding it open achieves
-nothing and closing it costs nothing. The decision matters because it
-changes which component owns session lifetime, and because a module that
-closes the fd will need revisiting the moment Phase C lands.
-
-Three options, in order of preference:
-
-1. **Hold it open and leak it deliberately**, as systemd does, so the
-   module is already correct when Phase C arrives. Costs one fd per
-   session and needs care that it is not closed by a `close_range` in
-   some other module.
-2. Close it immediately and rely on `ReleaseSession`. Simplest, correct
-   today, wrong later.
-3. Implement Phase C in slinit-logind first, then write the module
-   against a contract that is actually enforced.
-
-Option 3 is the honest one if the two can be sequenced; option 1
-otherwise. **Do not pick silently** — this is the one decision here that
-is about where a responsibility lives, not about code.
+Still to do for these steps: run them on a real login (console, sshd, a
+display manager) on Sunlight, not only through a test PAM service.
 
 ## 5. The rest of elogind parity
 

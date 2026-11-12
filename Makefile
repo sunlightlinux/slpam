@@ -21,11 +21,22 @@ PREFIX     ?= /usr
 SECURITYDIR ?= $(PREFIX)/lib/security
 
 MODULE = src/pam_slinit.so
+SRCS   = src/pam_slinit.c src/context.c
 
 all: $(MODULE)
 
-$(MODULE): src/pam_slinit.c src/pam_slinit.sym
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+$(MODULE): $(SRCS) src/context.h src/pam_slinit.sym
+	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDFLAGS) $(LDLIBS)
+
+# The rules that decide what a session is registered as, without PAM or a
+# bus: they are the part most easily got subtly wrong.
+TEST = tests/test_context
+
+$(TEST): tests/test_context.c src/context.c src/context.h
+	$(CC) -O0 -g -Wall -Wextra -Isrc tests/test_context.c src/context.c -o $@
+
+test: $(TEST)
+	./$(TEST)
 
 # The symbol set is part of the contract, so it is checked, not assumed.
 check: $(MODULE)
@@ -40,6 +51,6 @@ install: $(MODULE)
 	install -Dm755 $(MODULE) $(DESTDIR)$(SECURITYDIR)/pam_slinit.so
 
 clean:
-	rm -f $(MODULE)
+	rm -f $(MODULE) $(TEST)
 
-.PHONY: all check install clean
+.PHONY: all check test install clean

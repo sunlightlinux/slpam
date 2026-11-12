@@ -60,38 +60,61 @@ That is a property of the host's dbus, not of this module, and it is
 worth knowing before someone reads an `ldd` on a development machine and
 concludes the opposite.
 
-### `CreateSession`, not `CreateSessionWithPIDFD`
+### `CreateSessionWithPIDFD`, falling back to `CreateSession`
 
-elogind prefers the pidfd variant when it can get one.
-`slinit-logind` implements `CreateSession` and **not**
-`CreateSessionWithPIDFD`, so this module calls the former. The
-signatures line up exactly — elogind sends `uusssssussbss` and
-slinit-logind's handler takes those parameters in that order, returning
-the same eight values.
+The module names the session leader by a pidfd, so a pid recycled between
+the module reading it and slinit-logind acting on it cannot make another
+process the leader. slinit-logind has the call from 3.16; against an
+older one the call fails with `UnknownMethod` and the module retries with
+`CreateSession` and the pid, as `pam_systemd` does against an older
+logind. Both carry systemd's signatures exactly.
 
-## The session lifetime contract, as it actually stands
+## The session lifetime contract
 
-`CreateSession` returns a FIFO file descriptor. In systemd and elogind
-that fd *is* the session's lifetime: logind watches the read end, and
-when every copy of the write end is closed the session ends.
+A session ends when its leader process exits, which slinit-logind watches
+through a pidfd, or when `pam_sm_close_session` calls `ReleaseSession`.
+That is systemd's contract since v258.
 
-**slinit-logind ships the fd but does not watch it yet** — its own
-comment calls that Phase C. Cleanup currently depends on:
+The file descriptor `CreateSession` returns is not part of it. Before v258
+it was a FIFO whose closing ended the session; systemd now returns a
+placeholder, and so does slinit-logind from 3.16 (earlier versions
+returned a FIFO they never watched). The module closes it at once.
 
-1. the explicit `ReleaseSession` call from `pam_sm_close_session`, and
-2. a watch on the session leader's death, as a safety net for a greeter
-   that crashes or is killed before PAM can close the session.
+`ReleaseSession` still matters: it ends the session when the login does,
+not when the leader exits, which differs for a display manager's worker
+or a session that left a process behind. The module releases only a
+session it created; for an `existing` one it does nothing at close, since
+that session belongs to whoever created it.
 
-So for this module, **`ReleaseSession` is not optional** — it is the
-cleanup path, not a courtesy. What to do with the FIFO fd is an open
-decision recorded in `TODO.md`, because holding it open achieves nothing
-today but matches where slinit-logind is going.
+## What the module sends
+
+The rules `pam_systemd` applies before `CreateSession`, so a session
+looks the same to slinit-logind whichever module registered it
+(`src/context.c`, tested by `make test`):
+
+- type, class, desktop, seat and VT come from `XDG_SESSION_TYPE`,
+  `XDG_SESSION_CLASS`, `XDG_SESSION_DESKTOP`, `XDG_SEAT` and `XDG_VTNR` in
+  the PAM environment, then the process environment, then the module's
+  `type=`, `class=` and `desktop=` arguments;
+- a tty containing `:` is an X display; `cron` and `ssh` are not ttys;
+  a `/dev/` prefix is dropped;
+- type defaults to `x11`, `tty` or `unspecified`; class to `background`
+  for `unspecified`, else `user`;
+- seat and VT number are left to slinit-logind, which derives them from a
+  virtual-console tty as systemd-logind does.
+
+It then exports `XDG_SESSION_ID`, `XDG_SESSION_TYPE`, `XDG_SESSION_CLASS`,
+`XDG_SESSION_DESKTOP`, `XDG_SEAT`, `XDG_VTNR`, and, for a new session whose
+runtime directory exists and belongs to the user, `XDG_RUNTIME_DIR`.
+
+Options: `debug`, `class=`, `type=`, `desktop=`.
 
 ## Building
 
 ```sh
 make                 # builds src/pam_slinit.so
 make check           # asserts the module exports exactly two symbols
+make test            # the session-parameter rules, without PAM or a bus
 ```
 
 Requires `libpam` and `libdbus-1` development headers (`pam-devel`,
@@ -99,6 +122,5 @@ Requires `libpam` and `libdbus-1` development headers (`pam-devel`,
 
 ## Status
 
-Skeleton. The build, the exported symbol set and the decisions above are
-settled; the session logic is not yet written. `TODO.md` lists what
-remains, in the order it should be done.
+Opens and releases sessions. Not yet in any `/etc/pam.d` file on Sunlight,
+and elogind is still installed: `TODO.md` lists what remains.
