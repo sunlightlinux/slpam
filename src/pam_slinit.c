@@ -1062,7 +1062,23 @@ SLPAM_PUBLIC PAM_EXTERN int pam_sm_open_session(pam_handle_t *handle, int flags,
                 open_osc_context(handle, &o, pw, session_id);
 out:
         if (r != PAM_SUCCESS) {
-                /* A login that fails leaves nothing behind: no session, no lock. */
+                static const char *const of_the_session[] = {
+                        "XDG_SESSION_ID", "XDG_SEAT", "XDG_VTNR",
+                        "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+                };
+                const void *created = NULL;
+
+                /*
+                 * A login that fails leaves nothing behind: no session, no
+                 * lock, and none of the variables that named the session
+                 * and where it lives. Only when this handle created one;
+                 * otherwise they are somebody else's and stay. Type, class
+                 * and desktop stay too: they describe what was asked for,
+                 * and a display manager sets them before the module runs.
+                 */
+                if (pam_get_data(handle, DATA_SESSION_ID, &created) == PAM_SUCCESS && created != NULL)
+                        for (size_t i = 0; i < sizeof(of_the_session) / sizeof(of_the_session[0]); i++)
+                                (void) put(handle, of_the_session[i], NULL);
                 (void) release_created(handle, &o);
                 (void) pam_set_data(handle, DATA_INHIBIT_FD, NULL, NULL);
         }

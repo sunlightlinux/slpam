@@ -129,7 +129,12 @@ console" grants. Earlier slinit-logind versions open a nested session
 instead.
 
 If the login fails after the session was created, the module releases the
-session and drops the inhibitor lock before returning the error.
+session, drops the inhibitor lock and removes `XDG_SESSION_ID`,
+`XDG_SEAT`, `XDG_VTNR`, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
+from the PAM environment before returning the error: nothing is left
+naming a session that no longer exists. Type, class and desktop stay,
+since they describe what was asked for and a display manager sets them
+before the module runs.
 
 Class `none`, from `class=none` or `XDG_SESSION_CLASS=none`, registers
 nothing and succeeds.
