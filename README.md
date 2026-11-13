@@ -100,21 +100,128 @@ looks the same to slinit-logind whichever module registered it
   a `/dev/` prefix is dropped;
 - type defaults to `x11`, `tty` or `unspecified`; class to `background`
   for `unspecified`, else `user`;
-- seat and VT number are left to slinit-logind, which derives them from a
-  virtual-console tty as systemd-logind does.
+- for a tty, seat and VT number are left to slinit-logind, which derives
+  them from a virtual-console tty as systemd-logind does;
+- for an X display with no `XDG_VTNR`, the module asks the X server: it
+  connects to the display's socket, takes the peer's pid and reads that
+  process's controlling tty. A VT there puts the session on `seat0`. A
+  display manager that sets `XDG_SEAT` and `XDG_VTNR` skips this; `xdm`
+  and its kind set neither and would otherwise get a session with no seat.
+  The peer must be root or the user being logged in, because any user can
+  bind the abstract socket name of a display nobody is serving; and the
+  connect gives up after two seconds, so a server that has stopped
+  accepting does not hold the login.
 
 It then exports `XDG_SESSION_ID`, `XDG_SESSION_TYPE`, `XDG_SESSION_CLASS`,
-`XDG_SESSION_DESKTOP`, `XDG_SEAT`, `XDG_VTNR`, and, for a new session whose
-runtime directory exists and belongs to the user, `XDG_RUNTIME_DIR`.
+`XDG_SESSION_DESKTOP`, `XDG_SEAT`, `XDG_VTNR`, and, when the session
+belongs to the user being logged in and its runtime directory exists and
+is theirs, `XDG_RUNTIME_DIR` — plus `DBUS_SESSION_BUS_ADDRESS` if a user
+bus is listening at `$XDG_RUNTIME_DIR/bus`. A variable with no value is
+removed rather than left as an earlier module set it.
 
-Options: `debug`, `class=`, `type=`, `desktop=`.
+A `SessionBusy` answer is success with no session variables exported:
+there is nothing to open. systemd-logind sends it for a caller already in
+a session, `su` and `sudo` above all. slinit-logind sends it from the
+version that refuses nested sessions, for the same case and for a VT on
+`seat0` that a non-greeter session already holds; a login on such a VT
+therefore goes through with no session, and none of what "active on the
+console" grants. Earlier slinit-logind versions open a nested session
+instead.
+
+If the login fails after the session was created, the module releases the
+session and drops the inhibitor lock before returning the error.
+
+Class `none`, from `class=none` or `XDG_SESSION_CLASS=none`, registers
+nothing and succeeds.
+
+## What else it does, as `pam_systemd` does
+
+Checked against systemd v262 (`src/login/pam_systemd.c`). All of it also
+happens when no session was registered.
+
+- **`HOME`** is set from the user's passwd entry.
+- **Inhibitor lock.** `inhibit=shutdown:sleep` (or `XDG_SESSION_INHIBIT`),
+  with `inhibit-why=` (or `XDG_SESSION_INHIBIT_WHY`), takes a block-mode
+  lock through `Inhibit` and holds it until the session closes. Failing
+  to get it is logged and the login goes on.
+- **Areas.** `area=work` (or `XDG_AREA`) logs the user into
+  `~/Areas/work`: `HOME` points there, `XDG_AREA` is set, and
+  `XDG_RUNTIME_DIR` becomes `<runtime>/Areas/work`, created if missing.
+  The area must be a directory the user owns; if not, they are told and
+  get their ordinary home. `src/area.c`: the runtime directory belongs to
+  the user, so each level is opened without following symlinks and a new
+  directory is renamed into place only once its ownership is right.
+- **Session markers.** For a `tty` session with a terminal on stdout and
+  `TERM` not `dumb`, the OSC 3008 `start` sequence is written at open and
+  its `end` at close (`src/osc.c`).
+- **Shell credentials.** `shell.prompt.prefix`, `shell.prompt.suffix` and
+  `shell.welcome` from `$CREDENTIALS_DIRECTORY`, if the service has one,
+  become `SHELL_PROMPT_PREFIX`, `SHELL_PROMPT_SUFFIX` and `SHELL_WELCOME`.
+- **`XDG_SESSION_EXTRA_DEVICE_ACCESS`** is carried into the session.
+
+Options: `debug` (also `debug=yes|no`), `class=`, `type=`, `desktop=`,
+`area=`, `inhibit=`, `inhibit-why=`.
+
+## The environment is input, so guard it
+
+`XDG_SESSION_CLASS`, `XDG_SESSION_TYPE`, `XDG_SEAT`, `XDG_VTNR`,
+`XDG_AREA` and `XDG_SESSION_INHIBIT` are read from the PAM environment
+and then from the process's own, exactly as `pam_systemd` reads them.
+That is what lets a display manager describe its session, and it is safe
+only while the user being logged in cannot set them:
+
+- `XDG_SESSION_CLASS=greeter` is allowed to share a VT that another
+  session holds, which slinit-logind otherwise refuses;
+- `XDG_SEAT` and `XDG_VTNR` say which console the session is on, and
+  being active on a console is what polkit's `allow_active` rules reward;
+- `XDG_SESSION_INHIBIT=shutdown` blocks the machine from powering off for
+  as long as the session lasts.
+
+So, in the stack that loads this module:
+
+- no `pam_env.so user_readenv=1`, and nothing else that copies
+  user-controlled files into the PAM environment, before `pam_slinit.so`;
+- `sshd_config` must not `AcceptEnv XDG_*`, nor `PermitUserEnvironment`;
+- a service that calls PAM with these already in its own environment
+  passes them on: that is the feature, so it must be the service's
+  intent.
+
+This has to be checked in Sunlight's `/etc/pam.d` and `sshd_config` when
+the module is wired in; the module cannot tell a display manager's
+variable from a user's.
+
+### Where it still differs from `pam_systemd`
+
+- **A failed marker.** `pam_systemd` fails the login when it cannot write
+  the OSC `start` sequence. This module logs it and carries on: a marker
+  for the terminal's benefit is not worth a refused login.
+
+- **Session classes.** No `user-early`, `user-light`, `background-light`
+  or `user-incomplete`. In systemd they decide whether a user service
+  manager is started; Sunlight has none, and slinit-logind stores the
+  class as given without acting on it.
+- **Release.** `pam_systemd` no longer reads `existing` and releases
+  whatever `XDG_SESSION_ID` names. This module releases only a session it
+  created: slinit-logind lets root release any session, and matches an
+  existing one by leader pid.
+- **Varlink.** `pam_systemd` tries `io.systemd.Login` first; slinit-logind
+  speaks D-Bus only, so the list in `XDG_SESSION_EXTRA_DEVICE_ACCESS`,
+  which travels only over Varlink, is exported but not sent.
+- **User records.** No umask, nice level, rlimits, capability sets, `TZ`,
+  `LANG` or default area from systemd's JSON user records.
+- **Resource limits.** `systemd.memory_max` and its siblings are not sent
+  as session properties.
+
+Against `pam_elogind` there is one more: `PAM_TTY=cron` and `PAM_TTY=ssh`
+set the class only when none was given, as `pam_systemd` does, where
+`pam_elogind` overwrites it.
 
 ## Building
 
 ```sh
 make                 # builds src/pam_slinit.so
 make check           # asserts the module exports exactly two symbols
-make test            # the session-parameter rules, without PAM or a bus
+make test            # session rules, OSC sequences, area directories: no PAM, no bus
 ```
 
 Requires `libpam` and `libdbus-1` development headers (`pam-devel`,

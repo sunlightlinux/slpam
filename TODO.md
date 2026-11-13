@@ -1,8 +1,8 @@
 # slpam — remaining work, in order
 
 The build, the exported symbol set and the design decisions in
-`README.md` are settled. The session logic is not written. This is the
-order to write it in, and why.
+`README.md` are settled, and the session logic is written. What follows
+is what remains, in order.
 
 ## 1–4. Done
 
@@ -18,9 +18,27 @@ display manager) on Sunlight, not only through a test PAM service.
 
 ## 5. The rest of elogind parity
 
-`MemoryMax` / `MemoryMaxScale` properties, `pam_slinit.8`, and the
-`class=background` / `type=unspecified` edge cases. None of it blocks a
-working login.
+Done, against `pam_elogind.c` and then systemd v262's `pam_systemd.c`:
+seat and VT from an X display, `SessionBusy`, class `none`,
+`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR` keyed on the session's
+owner, `HOME`, `inhibit=`, areas, the OSC session markers, shell
+credentials, `debug=`. README.md lists what still differs and why.
+
+Left: `pam_slinit.8`. `MemoryMax` and the other limits are not elogind
+parity — elogind compiles them out (`#if 0`) — so they wait until
+slinit-logind does something with the properties array.
+
+Not covered by `make test`, because they need PAM and a bus: the calls
+themselves. They were run through a test PAM service against a mock
+`org.freedesktop.login1` (create, the `CreateSession` fallback,
+`SessionBusy`, class `none`, `Inhibit`, release, the OSC sequences on a
+pty, an area end to end, a login that fails after the session exists,
+an X socket that never accepts, 300 open/close cycles with a flat heap).
+The shell credentials have not been run at all.
+
+Before the module goes into `system-login`: check that nothing in
+Sunlight's `/etc/pam.d` or `sshd_config` lets a user set `XDG_*`
+(README.md, "The environment is input").
 
 ## 6. Distro side — a separate piece of work
 

@@ -53,4 +53,17 @@ void slpam_context_settle(struct slpam_context *c);
 /* True for the names a remote host takes when it is in fact this machine. */
 bool slpam_is_localhost(const char *host);
 
+/*
+ * XDG_VTNR as a number: decimal digits and nothing else, or 0. "3abc" and
+ * "-1" are not VT numbers, and strtoul would have accepted both.
+ */
+uint32_t slpam_parse_vtnr(const char *s);
+
+/*
+ * The virtual terminal a process has as its controlling tty, read from
+ * the contents of its /proc/<pid>/stat, or 0 when it has none or the tty
+ * is not a virtual console. Used to place an X display on a VT.
+ */
+uint32_t slpam_vtnr_from_stat(const char *stat);
+
 #endif

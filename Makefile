@@ -14,6 +14,12 @@ CFLAGS  += $(shell $(PKGCONF) --cflags dbus-1)
 # dlopen time, inside sshd, on somebody's only route into the machine.
 LDFLAGS += -shared -Wl,-z,defs,-z,relro,-z,now
 LDFLAGS += -Wl,--version-script=src/pam_slinit.sym
+# nodelete: libdbus keeps process-wide state (its message cache, its locks,
+# the bus addresses) that only dbus_shutdown() frees, and that call is not
+# ours to make inside somebody else's process. If pam_end() unloaded this
+# module, libdbus would go with it and all of that would be lost each time,
+# a few kilobytes per login in a daemon that does not fork for each one.
+LDFLAGS += -Wl,-z,nodelete
 LDLIBS  += $(shell $(PKGCONF) --libs dbus-1) -lpam
 
 DESTDIR    ?=
@@ -21,19 +27,23 @@ PREFIX     ?= /usr
 SECURITYDIR ?= $(PREFIX)/lib/security
 
 MODULE = src/pam_slinit.so
-SRCS   = src/pam_slinit.c src/context.c
+SRCS   = src/pam_slinit.c src/context.c src/osc.c src/area.c
+HDRS   = src/context.h src/osc.h src/area.h
 
 all: $(MODULE)
 
-$(MODULE): $(SRCS) src/context.h src/pam_slinit.sym
+# The Makefile too: a changed link flag must not leave the old object in place.
+$(MODULE): $(SRCS) $(HDRS) src/pam_slinit.sym Makefile
 	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDFLAGS) $(LDLIBS)
 
 # The rules that decide what a session is registered as, without PAM or a
 # bus: they are the part most easily got subtly wrong.
 TEST = tests/test_context
 
-$(TEST): tests/test_context.c src/context.c src/context.h
-	$(CC) -O0 -g -Wall -Wextra -Isrc tests/test_context.c src/context.c -o $@
+TEST_SRCS = tests/test_context.c src/context.c src/osc.c src/area.c
+
+$(TEST): $(TEST_SRCS) $(HDRS)
+	$(CC) -O0 -g -Wall -Wextra -Isrc $(TEST_SRCS) -o $@
 
 test: $(TEST)
 	./$(TEST)
