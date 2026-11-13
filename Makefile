@@ -7,20 +7,25 @@ CC      ?= cc
 PKGCONF ?= pkg-config
 
 CFLAGS  ?= -O2 -g -Wall -Wextra -Wformat=2 -Wshadow -Wstrict-prototypes
-CFLAGS  += -fPIC -fvisibility=hidden
-CFLAGS  += $(shell $(PKGCONF) --cflags dbus-1)
+# override: a packager passes CFLAGS and LDFLAGS on make's command line
+# (xbps-src does), and a command-line variable silently discards a plain
+# `+=`. These are not preferences to be replaced: without -fPIC and
+# -shared there is no module, and without the version script and
+# -fvisibility=hidden it exports whatever it likes.
+override CFLAGS  += -fPIC -fvisibility=hidden
+override CFLAGS  += $(shell $(PKGCONF) --cflags dbus-1)
 
 # -z defs so an undefined symbol fails the link here rather than at
 # dlopen time, inside sshd, on somebody's only route into the machine.
-LDFLAGS += -shared -Wl,-z,defs,-z,relro,-z,now
-LDFLAGS += -Wl,--version-script=src/pam_slinit.sym
+override LDFLAGS += -shared -Wl,-z,defs,-z,relro,-z,now
+override LDFLAGS += -Wl,--version-script=src/pam_slinit.sym
 # nodelete: libdbus keeps process-wide state (its message cache, its locks,
 # the bus addresses) that only dbus_shutdown() frees, and that call is not
 # ours to make inside somebody else's process. If pam_end() unloaded this
 # module, libdbus would go with it and all of that would be lost each time,
 # a few kilobytes per login in a daemon that does not fork for each one.
-LDFLAGS += -Wl,-z,nodelete
-LDLIBS  += $(shell $(PKGCONF) --libs dbus-1) -lpam
+override LDFLAGS += -Wl,-z,nodelete
+override LDLIBS  += $(shell $(PKGCONF) --libs dbus-1) -lpam
 
 DESTDIR    ?=
 PREFIX     ?= /usr
