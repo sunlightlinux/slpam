@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/random.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 
 #include "area.h"
 
@@ -61,6 +62,20 @@ int slpam_area_home(const char *home, const char *area, uid_t uid, char **resolv
         return r;
 }
 
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1 << 0)
+#endif
+
+/*
+ * renameat2() by its system call number: the kernel has had it since 3.15,
+ * but a libc may not wrap it — musl only does in recent releases — and the
+ * NOREPLACE is the point, so plain renameat() is not a fallback.
+ */
+static int rename_noreplace(int dir, const char *from, const char *to)
+{
+        return (int) syscall(SYS_renameat2, dir, from, dir, to, RENAME_NOREPLACE);
+}
+
 /* Opens parent/name, creating it owned by uid:gid with the given mode. */
 static int mkdir_chown_open(int parent, const char *name, uid_t uid, gid_t gid, mode_t mode)
 {
@@ -96,7 +111,7 @@ static int mkdir_chown_open(int parent, const char *name, uid_t uid, gid_t gid, 
                         close(fd);
                         goto fail;
                 }
-                if (renameat2(parent, tmp, parent, name, RENAME_NOREPLACE) == 0)
+                if (rename_noreplace(parent, tmp, name) == 0)
                         return fd;
                 r = -errno;
                 close(fd);
