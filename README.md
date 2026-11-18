@@ -195,6 +195,25 @@ This has to be checked in Sunlight's `/etc/pam.d` and `sshd_config` when
 the module is wired in; the module cannot tell a display manager's
 variable from a user's.
 
+## What the module does not trust
+
+- **The bus address.** The system bus address is compiled in
+  (`SYSTEM_BUS_ADDRESS`, by default what `dbus-1.pc` says) and
+  `DBUS_SYSTEM_BUS_ADDRESS` is never read. libdbus would read it, and an
+  address can be `unixexec:path=...`, a program to run. libdbus ignores
+  the variable in a setuid process, but tells one by comparing the real,
+  effective and saved ids, so a setuid program that has made all three
+  root and still has its caller's environment when it opens the session
+  would run the caller's program as root. Override `SYSTEM_BUS_ADDRESS`
+  only to point a test build at a private bus.
+- **Strings that are not UTF-8.** D-Bus strings must be UTF-8, and libdbus
+  answers one that is not by calling `abort()` in the process that loaded
+  the module. A remote host name, an X display or an `XDG_*` value that
+  is not valid UTF-8 is logged and left out; `remote` stays set for a
+  host name that could not be sent.
+- **`$XDG_RUNTIME_DIR/bus`.** `DBUS_SESSION_BUS_ADDRESS` is exported only
+  when that name is itself a socket, not a symlink to something.
+
 ### Where it still differs from `pam_systemd`
 
 - **A failed marker.** `pam_systemd` fails the login when it cannot write

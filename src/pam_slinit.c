@@ -50,6 +50,15 @@
 #define LOGIN1_IFACE "org.freedesktop.login1.Manager"
 #define LOGIN1_SESSION_BUSY "org.freedesktop.login1.SessionBusy"
 
+/*
+ * Where the system bus is. Fixed when the module is built, from what
+ * dbus itself was built with, and never read from the environment: see
+ * bus_open().
+ */
+#ifndef SLPAM_SYSTEM_BUS_ADDRESS
+#define SLPAM_SYSTEM_BUS_ADDRESS "unix:path=/run/dbus/system_bus_socket"
+#endif
+
 /* The session this handle registered, for close_session to release. */
 #define DATA_SESSION_ID "slinit.session-id"
 /* The inhibitor lock held while the session is open. */
@@ -176,6 +185,21 @@ static const char *nz(const char *s)
 }
 
 /*
+ * A string that will go into a D-Bus message, or NULL if it cannot. D-Bus
+ * strings are UTF-8, and libdbus does not return an error for one that is
+ * not: it calls abort(), in whatever process loaded this module. A host
+ * name from reverse DNS or a variable somebody set is enough to get there,
+ * so everything that came from outside passes through here first.
+ */
+static const char *utf8(pam_handle_t *handle, const char *what, const char *s)
+{
+        if (s == NULL || dbus_validate_utf8(s, NULL))
+                return s;
+        pam_syslog(handle, LOG_WARNING, "%s is not valid UTF-8, ignoring it", what);
+        return NULL;
+}
+
+/*
  * Sets key, or with no value removes it: a variable left over from an
  * earlier module must not describe a session this one did not give it.
  */
@@ -285,18 +309,27 @@ out:
         return vtnr;
 }
 
+/*
+ * The address is a constant, not dbus_bus_get_private(DBUS_BUS_SYSTEM).
+ * That call takes the address from DBUS_SYSTEM_BUS_ADDRESS, and an address
+ * may be "unixexec:path=...", which is a program to run. libdbus ignores
+ * the variable in a setuid process, but it decides what that is by
+ * comparing the real, effective and saved ids — not by how the process
+ * was started. A program that is setuid, has made all three root, and
+ * still carries its caller's environment when it opens the session would
+ * run the caller's program as root. sd-bus reads the variable with
+ * secure_getenv(); this module does not read it at all.
+ *
+ * Private, not shared: the login process may use the bus for something
+ * else, and closing a shared connection here would close it under them.
+ */
 static DBusConnection *bus_open(pam_handle_t *handle)
 {
         DBusError err;
         DBusConnection *conn;
 
         dbus_error_init(&err);
-        /*
-         * Private, not shared: the login process may use the bus for
-         * something else, and closing a shared connection here would
-         * close it under them.
-         */
-        conn = dbus_bus_get_private(DBUS_BUS_SYSTEM, &err);
+        conn = dbus_connection_open_private(SLPAM_SYSTEM_BUS_ADDRESS, &err);
         if (conn == NULL) {
                 pam_syslog(handle, LOG_ERR, "cannot connect to the system bus: %s", err.message);
                 dbus_error_free(&err);
@@ -304,6 +337,13 @@ static DBusConnection *bus_open(pam_handle_t *handle)
         }
         /* libdbus's default is to _exit() the process on disconnect. */
         dbus_connection_set_exit_on_disconnect(conn, FALSE);
+        if (!dbus_bus_register(conn, &err)) {
+                pam_syslog(handle, LOG_ERR, "cannot register on the system bus: %s", err.message);
+                dbus_error_free(&err);
+                dbus_connection_close(conn);
+                dbus_connection_unref(conn);
+                return NULL;
+        }
         return conn;
 }
 
@@ -424,15 +464,20 @@ static bool runtime_dir_ok(const char *path, uid_t uid)
  * DBUS_SESSION_BUS_ADDRESS, only when a user bus is in fact listening in
  * the runtime directory. Clients that do not look there by themselves
  * otherwise autolaunch a second bus. pam_elogind sets the same value.
+ *
+ * lstat and a socket, where pam_systemd has access(): the directory is the
+ * user's, and a `bus` symlink in it would otherwise have root report, by
+ * whether the variable appears, if any path of the user's choosing exists.
  */
 static int put_user_bus(pam_handle_t *handle, const char *runtime)
 {
         char *sock, *addr;
+        struct stat st;
         int r = PAM_SUCCESS;
 
         if (asprintf(&sock, "%s/bus", runtime) < 0)
                 return PAM_BUF_ERR;
-        if (access(sock, F_OK) == 0) {
+        if (lstat(sock, &st) == 0 && S_ISSOCK(st.st_mode)) {
                 if (asprintf(&addr, "unix:path=%s", sock) < 0)
                         r = PAM_BUF_ERR;
                 else {
@@ -1000,19 +1045,26 @@ SLPAM_PUBLIC PAM_EXTERN int pam_sm_open_session(pam_handle_t *handle, int flags,
                 return PAM_USER_UNKNOWN;
         }
 
-        c.service = item(handle, PAM_SERVICE);
-        c.tty = item(handle, PAM_TTY);
-        c.display = item(handle, PAM_XDISPLAY);
+        c.service = utf8(handle, "the service name", item(handle, PAM_SERVICE));
+        c.tty = utf8(handle, "the tty", item(handle, PAM_TTY));
+        c.display = utf8(handle, "the display", item(handle, PAM_XDISPLAY));
         c.remote_user = item(handle, PAM_RUSER);
         c.remote_host = item(handle, PAM_RHOST);
-        c.seat = env(handle, "XDG_SEAT", NULL);
+        c.seat = utf8(handle, "XDG_SEAT", env(handle, "XDG_SEAT", NULL));
         c.vtnr = slpam_parse_vtnr(env(handle, "XDG_VTNR", NULL));
-        c.type = env(handle, "XDG_SESSION_TYPE", o.type);
-        c.session_class = env(handle, "XDG_SESSION_CLASS", o.session_class);
-        c.desktop = env(handle, "XDG_SESSION_DESKTOP", o.desktop);
-        inhibit = env(handle, "XDG_SESSION_INHIBIT", o.inhibit);
-        inhibit_why = env(handle, "XDG_SESSION_INHIBIT_WHY", o.inhibit_why);
+        c.type = utf8(handle, "the session type", env(handle, "XDG_SESSION_TYPE", o.type));
+        c.session_class = utf8(handle, "the session class", env(handle, "XDG_SESSION_CLASS", o.session_class));
+        c.desktop = utf8(handle, "the session desktop", env(handle, "XDG_SESSION_DESKTOP", o.desktop));
+        inhibit = utf8(handle, "the inhibit list", env(handle, "XDG_SESSION_INHIBIT", o.inhibit));
+        inhibit_why = utf8(handle, "the inhibit reason", env(handle, "XDG_SESSION_INHIBIT_WHY", o.inhibit_why));
         slpam_context_settle(&c);
+        /*
+         * After settle, not before: a host name that cannot be sent still
+         * says the login came from somewhere else, and `remote` must go on
+         * saying so.
+         */
+        c.remote_user = utf8(handle, "the remote user", c.remote_user);
+        c.remote_host = utf8(handle, "the remote host", c.remote_host);
 
         /* An X display with no VT given: ask the X server which one it is on. */
         if (c.display != NULL && *c.display != '\0' && c.vtnr == 0 &&
@@ -1044,7 +1096,7 @@ SLPAM_PUBLIC PAM_EXTERN int pam_sm_open_session(pam_handle_t *handle, int flags,
                 goto out;
 
         if (inhibit != NULL)
-                acquire_inhibit_lock(handle, &o, inhibit, inhibit_why, item(handle, PAM_SERVICE));
+                acquire_inhibit_lock(handle, &o, inhibit, inhibit_why, c.service);
 
         /*
          * Carried into the session as it was given. Only systemd-logind's

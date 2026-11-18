@@ -15,6 +15,16 @@ CFLAGS  ?= -O2 -g -Wall -Wextra -Wformat=2 -Wshadow -Wstrict-prototypes
 override CFLAGS  += -fPIC -fvisibility=hidden
 override CFLAGS  += $(shell $(PKGCONF) --cflags dbus-1)
 
+# The system bus address is compiled in, from what dbus was built with,
+# and never taken from the environment at run time: an address can name a
+# program to run (src/pam_slinit.c, bus_open). Override it only to point a
+# test build at a private bus.
+SYSTEM_BUS_ADDRESS ?= $(shell $(PKGCONF) --variable=system_bus_default_address dbus-1)
+ifeq ($(strip $(SYSTEM_BUS_ADDRESS)),)
+SYSTEM_BUS_ADDRESS = unix:path=/run/dbus/system_bus_socket
+endif
+override CFLAGS  += -DSLPAM_SYSTEM_BUS_ADDRESS='"$(SYSTEM_BUS_ADDRESS)"'
+
 # -z defs so an undefined symbol fails the link here rather than at
 # dlopen time, inside sshd, on somebody's only route into the machine.
 override LDFLAGS += -shared -Wl,-z,defs,-z,relro,-z,now

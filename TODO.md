@@ -34,7 +34,12 @@ themselves. They were run through a test PAM service against a mock
 `SessionBusy`, class `none`, `Inhibit`, release, the OSC sequences on a
 pty, an area end to end, a login that fails after the session exists,
 an X socket that never accepts, 300 open/close cycles with a flat heap).
-The shell credentials have not been run at all.
+Also strings that are not UTF-8 in every field that reaches the bus, and a
+`DBUS_SYSTEM_BUS_ADDRESS` naming a program. The shell credentials have not
+been run at all.
+
+That run needs a module built with `SYSTEM_BUS_ADDRESS=` set to the mock's
+bus, since the address is no longer taken from the environment.
 
 Before the module goes into `system-login`: check that nothing in
 Sunlight's `/etc/pam.d` or `sshd_config` lets a user set `XDG_*`
