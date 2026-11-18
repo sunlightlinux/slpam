@@ -30,7 +30,9 @@ So:
 
 ```sh
 make          # builds src/pam_slinit.so
-make check    # asserts the module exports exactly two symbols
+make check    # asserts what the built object is: symbols, link flags, libraries
+make test     # the rules that need neither PAM nor a bus
+make e2e      # the module in a PAM application, against a mock slinit-logind
 ```
 
 Needs `libpam` and `libdbus-1` headers — `pam-devel` and `dbus-devel` on
@@ -47,7 +49,8 @@ entry point, add it to `src/pam_slinit.sym` and to the check.
 1. Fork the repository
 2. Create a branch (`git checkout -b pam/open-session`)
 3. Make the change
-4. `make && make check` must pass
+4. `make && make check && make test && make e2e` must pass; CI runs
+   them too, with a second compiler, two static analysers and musl
 5. Say in the PR **how you tested it** — which PAM service, on what, and
    whether the machine stayed reachable
 6. Push and open a Pull Request

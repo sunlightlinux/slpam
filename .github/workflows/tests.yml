@@ -1,0 +1,168 @@
+# Build, static analysis, unit tests and end-to-end tests, on every push
+# and pull request.
+#
+# Why this exists: a PAM module that is wrong does not fail a test, it
+# locks a machine. Until this workflow nothing ran on a push at all, and
+# every check the module had was whatever its last author remembered to
+# run by hand. Two of the bugs that got as far as a tagged release were
+# of exactly the kind a runner finds for free: a build that lost its own
+# flags when a packager passed CFLAGS, and a string that was not UTF-8
+# ending the login process.
+#
+# What is deliberately NOT here: a real login. The end-to-end job loads
+# the module into a real PAM application, but the daemon it talks to is
+# tests/e2e/mock_login1.py, not slinit-logind, and the application is not
+# login, sshd or a display manager. Whether slinit-logind answers as the
+# mock does, and whether a user can log in on a console, needs a machine
+# running Sunlight; that is done downstream and TODO.md says what is left.
+name: slpam tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      # Two compilers disagree about what deserves a warning, which is the
+      # point of running both; one failing must not hide the other.
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    name: build (${{ matrix.cc }})
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libdbus-1-dev pkg-config
+
+      - name: Report the toolchain
+        run: |
+          ${{ matrix.cc }} --version | head -1
+          pkg-config --modversion dbus-1
+          # The module's bus address is compiled in from this. Printed so
+          # that a runner image which moves it shows up here, not as a
+          # module that silently talks to nothing.
+          pkg-config --variable=system_bus_default_address dbus-1
+
+      # The Makefile's own warning flags, with -Werror. The flags are
+      # repeated here rather than appended because CFLAGS on the command
+      # line replaces the `?=` default — which is the behaviour the next
+      # step exists to test.
+      - name: Build with warnings as errors
+        run: |
+          make CC=${{ matrix.cc }} \
+            CFLAGS="-O2 -g -Wall -Wextra -Wformat=2 -Wshadow -Wstrict-prototypes -Werror"
+
+      - name: Check the built object
+        run: make check
+
+      - name: Unit tests
+        run: make CC=${{ matrix.cc }} test
+
+      - name: Unit tests under ASan and UBSan
+        run: make CC=${{ matrix.cc }} test-san
+
+      # v1.10.0 shipped with this broken. xbps-src passes CFLAGS and
+      # LDFLAGS on make's command line, a command-line variable discards a
+      # plain `+=`, and the module's own flags — -fPIC, -shared, the
+      # version script, the dbus include path — vanished. Built the way a
+      # packager builds, the object must still pass `make check`.
+      - name: Build the way a packager does
+        run: |
+          set -euo pipefail
+          flags=(CC=${{ matrix.cc }}
+                 CFLAGS="-O2 -pipe -fstack-clash-protection -D_FORTIFY_SOURCE=2"
+                 LDFLAGS="-Wl,--as-needed -Wl,-z,relro")
+          make -B "${flags[@]}"
+          make "${flags[@]}" check
+          # And it installs where a packager points it.
+          make "${flags[@]}" DESTDIR="$PWD/_pkg" install
+          test -f _pkg/usr/lib/security/pam_slinit.so
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          # perl by name: scan-build is a Perl script and needs more of
+          # Perl than the base system carries. The runner image has it
+          # today; a minimal image does not, and the failure there is a
+          # missing module, not a finding.
+          sudo apt-get install -y libpam0g-dev libdbus-1-dev pkg-config clang-tools perl
+
+      # Both analysers were clean when this was written, so both are
+      # allowed to fail the job. If one starts reporting something that is
+      # not a bug, the answer is to restructure or annotate the code it
+      # misreads, not to drop the step: an analyser nobody has to listen
+      # to stops being read within a month.
+      - name: clang static analyzer
+        run: scan-build --status-bugs make -B
+
+      - name: gcc -fanalyzer
+        run: make -B CFLAGS="-O2 -g -Wall -Wextra -fanalyzer -Werror"
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build and test dependencies
+        # dbus for dbus-daemon, which the tests run privately; the two
+        # python packages are what the mock daemon is written with.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libdbus-1-dev pkg-config \
+            dbus python3-dbus python3-gi
+
+      # The suite builds its own copy of the module, for the address of
+      # the private bus it starts: the address is compiled in and never
+      # read from the environment, so the module under test cannot be the
+      # one `make` produces. Nothing here runs as root and nothing reads
+      # or writes /etc/pam.d.
+      #
+      # tests/e2e/run.py holds its own control, a login the daemon
+      # refuses, which has to fail: if every case in the suite were to
+      # pass regardless, that one would not.
+      - name: End-to-end tests
+        run: make e2e
+
+  # Void, where Sunlight's packaging comes from, ships a musl flavour, and
+  # musl is where a GNU extension used without noticing stops compiling.
+  # The first run of this job found one: renameat2() has no wrapper in
+  # Alpine 3.22's musl, and the module did not build there at all. The
+  # end-to-end tests run here too, minus the heap check, which needs
+  # glibc's mallinfo2.
+  musl:
+    runs-on: ubuntu-latest
+    container: alpine:3.22
+    steps:
+      - name: Install dependencies
+        run: |
+          apk add --no-cache build-base pkgconf dbus-dev linux-pam-dev \
+            git dbus python3 py3-dbus py3-gobject3
+
+      - uses: actions/checkout@v7
+
+      - name: Build with warnings as errors
+        run: make CFLAGS="-O2 -g -Wall -Wextra -Wformat=2 -Wshadow -Wstrict-prototypes -Werror"
+
+      - name: Check the built object
+        run: make check
+
+      - name: Unit tests
+        run: make test
+
+      - name: End-to-end tests
+        run: make e2e

@@ -63,7 +63,35 @@ $(TEST): $(TEST_SRCS) $(HDRS)
 test: $(TEST)
 	./$(TEST)
 
-# The symbol set is part of the contract, so it is checked, not assumed.
+# The same tests with the sanitizers watching: the area code makes and
+# renames directories as root in a directory the user owns, and the OSC
+# builder formats strings the user chose. Neither is where a stray byte
+# should go unnoticed.
+TEST_SAN = tests/test_context_san
+
+$(TEST_SAN): $(TEST_SRCS) $(HDRS)
+	$(CC) -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-fno-omit-frame-pointer -Isrc $(TEST_SRCS) -o $@
+
+test-san: $(TEST_SAN)
+	./$(TEST_SAN)
+
+# The module inside a real PAM application, against a mock slinit-logind on
+# a private bus. Needs dbus-daemon and python3 with dbus and gi; see
+# tests/e2e/run.py for what it does and does not show.
+PYTHON ?= python3
+
+e2e:
+	MAKE='$(MAKE)' CC='$(CC)' $(PYTHON) tests/e2e/run.py
+
+# What the built object must be, checked rather than assumed. Each line is
+# here because getting it wrong is silent:
+#  - the exported symbols: with -fvisibility=hidden and no attribute the
+#    module loads and PAM finds no entry point;
+#  - NODELETE and BIND_NOW: a packager's LDFLAGS once replaced the
+#    module's own, and nothing complained;
+#  - the three libraries: the module exists so that libsystemd and
+#    libelogind are not among them. musl's libc is libc.musl-<arch>.so.1.
 check: $(MODULE)
 	@got=$$(nm -D --defined-only $(MODULE) | awk '$$2=="T"{print $$3}' | sort | tr '\n' ' '); \
 	want="pam_sm_close_session pam_sm_open_session "; \
@@ -71,11 +99,25 @@ check: $(MODULE)
 		echo "exported symbols are '$$got', want '$$want'" >&2; exit 1; \
 	fi; \
 	echo "exports exactly: $$got"
+	@flags=$$(readelf -d $(MODULE) | awk '/FLAGS/{$$1=$$2=""; print}' | tr '\n' ' '); \
+	for f in NODELETE NOW; do \
+		case " $$flags " in *" $$f "*) ;; \
+		*) echo "$(MODULE) is not linked $$f (flags:$$flags)" >&2; exit 1 ;; esac; \
+	done; \
+	echo "linked: NODELETE NOW"
+	@got=$$(readelf -d $(MODULE) | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' \
+		| sed -e 's/\.so.*//' -e 's/^libc\.musl-.*/libc/' | sort | tr '\n' ' '); \
+	want="libc libdbus-1 libpam "; \
+	if [ "$$got" != "$$want" ]; then \
+		echo "needs '$$got', want '$$want'" >&2; exit 1; \
+	fi; \
+	echo "needs exactly: $$got"
 
 install: $(MODULE)
 	install -Dm755 $(MODULE) $(DESTDIR)$(SECURITYDIR)/pam_slinit.so
 
 clean:
-	rm -f $(MODULE) $(TEST)
+	rm -f $(MODULE) $(TEST) $(TEST_SAN)
+	rm -rf tests/e2e/_build
 
-.PHONY: all check test install clean
+.PHONY: all check test test-san e2e install clean

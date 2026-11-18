@@ -244,12 +244,37 @@ set the class only when none was given, as `pam_systemd` does, where
 
 ```sh
 make                 # builds src/pam_slinit.so
-make check           # asserts the module exports exactly two symbols
+make check           # the built object: two symbols, NODELETE, three libraries
 make test            # session rules, OSC sequences, area directories: no PAM, no bus
+make test-san        # the same under ASan and UBSan
+make e2e             # the module in a real PAM application, against a mock daemon
 ```
 
 Requires `libpam` and `libdbus-1` development headers (`pam-devel`,
-`dbus-devel` on Sunlight/Void).
+`dbus-devel` on Sunlight/Void). `make e2e` also needs `dbus-daemon` and
+python3 with `dbus` and `gi`.
+
+## Testing
+
+`make e2e` (`tests/e2e/run.py`) loads the module into a PAM application
+with a PAM configuration directory of its own, and has it talk over a
+private bus to `tests/e2e/mock_login1.py`, which answers as
+slinit-logind would and records what it was asked. Nothing runs as root,
+and neither `/etc/pam.d` nor the machine's own bus is touched. It covers
+the calls and their fallbacks, what is exported and when, the inhibitor
+lock, areas, the terminal markers on a pty, the shell credentials, a
+login that fails half-way, everything under "What the module does not
+trust", and 300 logins in one process with a flat heap.
+
+The module it tests is built for the run, with the private bus's address
+compiled in, since the address is never read from the environment.
+
+It does not show that the real slinit-logind answers as the mock does,
+or that a user can log in: that takes a machine running Sunlight.
+
+`.github/workflows/tests.yml` runs all of the above on every push and
+pull request, with gcc and clang, the two static analysers, the build as
+a packager does it, and again on musl.
 
 ## Status
 

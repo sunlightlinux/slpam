@@ -16,7 +16,9 @@ What this changes and why.
 A PAM module that is wrong locks machines out, so "it compiles" is not a
 test. Please say what you actually did.
 
-- [ ] `make && make check` pass
+- [ ] `make && make check && make test && make e2e` pass
+- [ ] A new behaviour has a case in `tests/e2e/run.py` that fails
+      without the change
 - [ ] Tested on a VM with console access, not a remote-only machine
 - [ ] PAM service(s) exercised: <!-- sshd / gdm / login / su -->
 - [ ] A second session stayed usable while testing

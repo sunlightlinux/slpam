@@ -1,0 +1,108 @@
+# Tarball verification — builds and tests the archive GitHub generates
+# for a tag, not the git checkout.
+#
+# That archive is what the xbps template feeds on (distfiles= and
+# checksum=), so it is the thing that actually gets packaged. A repository
+# can build perfectly while the tarball made from its tag does not: a
+# .gitattributes export-ignore, a file that was never added, a mode bit
+# that does not survive the archive. Only building the tarball catches
+# that, and it prints the sha256 the template needs.
+#
+# slpam publishes tags, not GitHub releases, so this runs on a tag push
+# rather than on `release: created` as slinit's does.
+name: Tarball verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to verify (e.g. v1.10.2). Empty means the newest tag."
+        required: false
+        default: ""
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Resolve the tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          else
+            # No default baked in: a literal goes stale the day after it
+            # is written and then verifies an old tag while looking like
+            # it verified the new one.
+            tag="$(git ls-remote --tags --refs --sort=-v:refname \
+                     "https://github.com/${{ github.repository }}" 'v*' \
+                   | head -1 | sed 's|.*refs/tags/||')"
+          fi
+          test -n "${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Verifying ${tag}"
+
+      - name: Download and unpack the tarball
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL --retry 3 -o "slpam-${TAG}.tar.gz" "$url"
+          sum="$(sha256sum "slpam-${TAG}.tar.gz" | cut -d' ' -f1)"
+          echo "sha256: ${sum}"
+          {
+            echo "## slpam ${TAG}"
+            echo
+            echo "\`checksum=${sum}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          tar -xf "slpam-${TAG}.tar.gz"
+          # GitHub names the top-level directory after the tag with the
+          # leading v stripped: v1.10.2 -> slpam-1.10.2.
+          mv "slpam-${VERSION}" slpam
+          ls slpam
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libdbus-1-dev pkg-config \
+            dbus python3-dbus python3-gi
+
+      # With the flags on the command line, as xbps-src passes them: the
+      # way this archive is really going to be built.
+      - name: Build the way a packager does
+        working-directory: slpam
+        run: |
+          set -euo pipefail
+          flags=(CFLAGS="-O2 -pipe -fstack-clash-protection -D_FORTIFY_SOURCE=2"
+                 LDFLAGS="-Wl,--as-needed -Wl,-z,relro")
+          make "${flags[@]}"
+          make "${flags[@]}" check
+
+      - name: Unit tests
+        working-directory: slpam
+        run: make test
+
+      # A tag older than the end-to-end suite has no such target; that is
+      # a fact about the tag, not a failure of it.
+      - name: End-to-end tests
+        working-directory: slpam
+        run: |
+          if [ -f tests/e2e/run.py ]; then
+            make e2e
+          else
+            echo "this tag predates tests/e2e — skipped"
+          fi
